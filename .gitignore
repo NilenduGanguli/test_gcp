@@ -1,0 +1,7 @@
+.env
+*.pem
+*.key
+service-account.json
+application_default_credentials.json
+node_modules/
+.DS_Store
