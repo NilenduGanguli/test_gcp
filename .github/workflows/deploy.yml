@@ -1,0 +1,84 @@
+name: Build and Deploy
+
+on:
+  push:
+    branches: [develop, staging, main]
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  AR_REPO: ${{ vars.GCP_AR_REPO }}
+  SERVICE_NAME: ziffy-api
+
+jobs:
+  # ─── DETERMINE ENVIRONMENT ───
+  set-env:
+    runs-on: ubuntu-latest
+    outputs:
+      environment: ${{ steps.env.outputs.environment }}
+      image_tag: ${{ steps.env.outputs.image_tag }}
+    steps:
+      - name: Set environment based on branch
+        id: env
+        run: |
+          if [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
+            echo "environment=production" >> $GITHUB_OUTPUT
+            echo "image_tag=prod-${{ github.sha }}" >> $GITHUB_OUTPUT
+          elif [[ "${{ github.ref }}" == "refs/heads/staging" ]]; then
+            echo "environment=staging" >> $GITHUB_OUTPUT
+            echo "image_tag=staging-${{ github.sha }}" >> $GITHUB_OUTPUT
+          else
+            echo "environment=development" >> $GITHUB_OUTPUT
+            echo "image_tag=dev-${{ github.sha }}" >> $GITHUB_OUTPUT
+          fi
+
+  # ─── BUILD AND DEPLOY ───
+  deploy:
+    needs: [set-env]
+    runs-on: ubuntu-latest
+    environment: ${{ needs.set-env.outputs.environment }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_SERVICE_ACCOUNT }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Authenticate Docker to Artifact Registry
+        run: gcloud auth configure-docker asia-south1-docker.pkg.dev --quiet
+
+      - name: Build and push Docker image
+        run: |
+          IMAGE="${{ env.AR_REPO }}/${{ env.SERVICE_NAME }}:${{ needs.set-env.outputs.image_tag }}"
+          docker build -t $IMAGE .
+          docker push $IMAGE
+
+      - name: Deploy to Cloud Run
+        id: deploy
+        uses: google-github-actions/deploy-cloudrun@v2
+        with:
+          service: ${{ env.SERVICE_NAME }}
+          region: ${{ vars.GCP_REGION }}
+          image: ${{ env.AR_REPO }}/${{ env.SERVICE_NAME }}:${{ needs.set-env.outputs.image_tag }}
+          project_id: ${{ vars.GCP_PROJECT_ID }}
+          flags: |
+            --service-account=cloudrun-runtime@${{ vars.GCP_PROJECT_ID }}.iam.gserviceaccount.com
+            --min-instances=${{ vars.MIN_INSTANCES || '0' }}
+            --max-instances=${{ vars.MAX_INSTANCES || '5' }}
+            --memory=${{ vars.MEMORY || '512Mi' }}
+            --cpu=${{ vars.CPU || '1' }}
+            --port=8080
+            --allow-unauthenticated
+
+      - name: Show deployment URL
+        run: |
+          echo "🚀 Deployed to: ${{ steps.deploy.outputs.url }}"
